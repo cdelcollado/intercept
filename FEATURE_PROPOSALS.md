@@ -284,6 +284,81 @@
 
 ---
 
+## 9. Web Serial API — Browser-Native Device Communication
+
+INTERCEPT currently relies on a Python backend (`intercept.py`) to bridge between the browser and external hardware (SDRs, Meshtastic radios, GPS receivers). The [Web Serial API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API) (Chrome 89+, Edge 89+) allows the browser to communicate directly with serial-port devices over USB, bypassing the backend entirely for certain modes.
+
+### Where It Would Work
+
+#### Meshtastic LoRa Devices (Heltec, T-Beam, RAK)
+- These radios enumerate as USB CDC/ACM serial ports (typically `/dev/ttyUSB0` or `/dev/ttyACM0`).
+- The browser could read raw Meshtastic protobuf frames, parse node telemetry, display messages, and send channel configuration — all without the Python backend.
+- This would make INTERCEPT's Meshtastic mode dramatically easier to set up: no Python driver stack, no `pyserial`, no `meshtastic` pip package. Just plug in the radio and open the page in Chrome.
+
+#### USB GPS Receivers
+- Most USB GPS receivers (GlobalSat BU-353-S4, VK-162, u-blox modules) present as serial CDC devices streaming NMEA sentences at 9600–115200 baud.
+- The browser could parse `$GPGGA`, `$GPRMC`, and `$GPGSA` sentences directly, feeding position data into the GPS mode, BT Locate trails, and shared observer location.
+- This eliminates the `gpsd` dependency entirely.
+
+#### SDR Configuration Interfaces (Control Channel Only)
+- Some SDRs expose a secondary serial interface for configuration (HackRF's USB DFU mode, ADF4351 synthesizer TTL interfaces, AT commands on certain LoRa/GPS combos).
+- Web Serial could be used for device configuration UIs without touching the IQ data path.
+
+### Where It Would NOT Work
+
+#### SDR IQ Data Streaming
+- Raw IQ samples from any SDR flow at **20–60 MB/s** (USB bulk transfer mode, not UART).
+- Web Serial is limited to UART baud rates (theoretical max ~12 Mbps, practical ~3–8 Mbps). This is orders of magnitude too slow for IQ streaming.
+- SDR processing must remain server-side where native tools (`rtl_fm`, `dump1090`, `acarsdec`) have direct USB access.
+
+#### Native Decoder Binaries
+- Tools like `airodump-ng`, `AIS-catcher`, `SatDump`, and `acarsdec` are compiled C/C++/Go/Java binaries that cannot run inside a browser sandbox.
+- The Python backend is irreplaceable as the bridge between these native tools and the web UI.
+
+### Implementation Strategy
+
+```
+┌─────────────┐     Web Serial API     ┌──────────────────┐
+│  Browser JS │ ◄────────────────────► │  USB Serial Device│
+│  (Chrome)   │    NMEA / Protobuf     │  (GPS / LoRa)    │
+└─────────────┘                         └──────────────────┘
+
+         │  SSE / fetch()
+         ▼
+┌─────────────────┐     USB Bulk (high-speed)
+│  Python Backend │ ◄──────────────────────────►  SDR Dongle
+│  (rtl_fm, etc.) │      20–60 MB/s IQ
+└─────────────────┘
+```
+
+**Hybrid architecture:**
+1. **Web Serial path** (browser → device): Meshtastic protocol data, GPS NMEA sentences, AT command configuration.
+2. **Backend path** (server → SDR): Raw IQ streaming, native decoder binaries, subprocess management.
+3. Both paths feed into the same SSE event bus and Vue/vanilla JS state layer — the user sees no difference.
+
+### Browser Support
+| Browser | Web Serial | Notes |
+|---------|-----------|-------|
+| Chrome 89+ | Full support | Desktop only (no Android) |
+| Edge 89+ | Full support | |
+| Opera 75+ | Full support | |
+| Firefox | No support | No plans to implement |
+| Safari | No support | No plans to implement |
+
+### Feasibility Assessment
+- **Impact**: High for Meshtastic and GPS modes (simpler setup, fewer dependencies). Zero impact for SDR-dependent modes.
+- **Effort**: Medium — `navigator.serial` API is straightforward. The existing JS mode modules need a serial transport layer alongside the current SSE/fetch transport.
+- **Chrome-only limitation**: This is acceptable because INTERCEPT is a local tool accessed via `localhost` or LAN. Firefox/Safari users would fall back to the existing backend path transparently.
+- **Feature detection**: `if ('serial' in navigator)` gates the entire code path. If unsupported, the current backend-driven flow remains unchanged.
+
+### Related Proposals
+This pairs well with:
+- **2.4 Plugin/Extension System** — Web Serial transport could be a plugin-provided capability.
+- **4.1 MQTT Publisher Bridge** — GPS data from Web Serial could be forwarded to MQTT without touching the backend.
+- **5.2 Mobile-First Layout** — Though Web Serial requires desktop Chrome, Meshtastic field ops on a laptop benefit from a mobile-friendly UI.
+
+---
+
 ## Summary Table
 
 | # | Feature | Category | Impact | Effort | Priority |
@@ -325,3 +400,4 @@
 | 7.2 | TDOA geolocation | Analysis | ★★★★☆ | Very High | Low |
 | 8.2 | KrakenSDR support | Hardware | ★★★☆☆ | High | Low |
 | 8.3 | PlutoSDR/USRP/BladeRF support | Hardware | ★★★☆☆ | Medium | Low |
+| 9.0 | Web Serial API — browser-native device comms | Platform | ★★★★☆ | Medium | Medium |
